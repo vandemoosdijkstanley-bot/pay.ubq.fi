@@ -1,6 +1,6 @@
 // use-permit-claiming.ts: Handles single and batch permit claiming
 
-import { Dispatch, SetStateAction, useCallback, useState } from "react";
+import { Dispatch, SetStateAction, useCallback, useRef, useState } from "react";
 import { Address, Chain, PublicClient, WalletClient, erc20Abi, isAddress } from "viem";
 import { NEW_PERMIT2_ADDRESS } from "../constants/config.ts";
 import permit2Abi from "../fixtures/permit2-abi.ts";
@@ -199,17 +199,40 @@ export function usePermitClaiming({
   const [isClaiming, setIsClaiming] = useState(false);
   const [sequentialClaimError, setSequentialClaimError] = useState<string | null>(null);
   const [swapSubmissionStatus, setSwapSubmissionStatus] = useState<Record<string, { status: string; message: string }>>({});
+  const submittedPermitSignaturesRef = useRef<Set<string>>(new Set());
 
+  /**
+   * Evaluates claimed permits and submits CoW Protocol swap orders for preferred payout tokens.
+   * Uses synchronous signature tracking to prevent duplicate orders across immediate and recovery paths.
+   *
+   * @param permitsClaimed - Array of successfully claimed PermitData objects.
+   */
   const maybeSubmitCowSwap = useCallback(
     async (permitsClaimed: PermitData[]) => {
       if (!preferredRewardTokenAddress) return;
       if (!address || !chain || !walletClient || !publicClient) return;
 
+      const eligiblePermits = permitsClaimed.filter((p) => {
+        if (!p.signature) return false;
+        if (submittedPermitSignaturesRef.current.has(p.signature)) return false;
+        return true;
+      });
+      if (!eligiblePermits.length) return;
+
+      for (const p of eligiblePermits) {
+        submittedPermitSignaturesRef.current.add(p.signature);
+      }
+
       const chainId = chain.id;
       const tokenOut = preferredRewardTokenAddress;
 
       const uusd = getTokenBySymbol(chainId, "UUSD")?.address;
-      if (!uusd) return;
+      if (!uusd) {
+        for (const p of eligiblePermits) {
+          submittedPermitSignaturesRef.current.delete(p.signature);
+        }
+        return;
+      }
 
       // Group by receiver so we never accidentally send the output to the wrong address.
       const group = new Map<string, { tokenIn: Address; receiver: Address; amountIn: bigint }>();
@@ -226,9 +249,7 @@ export function usePermitClaiming({
         group.set(key, { tokenIn, receiver, amountIn: current + (permit.amount ?? 0n) });
       }
 
-      const groups = [...group.entries()]
-        .map(([key, value]) => ({ key, ...value }))
-        .filter((g) => g.amountIn > 0n);
+      const groups = [...group.entries()].map(([key, value]) => ({ key, ...value })).filter((g) => g.amountIn > 0n);
 
       // Initialize UI state.
       for (const g of groups) {
@@ -310,12 +331,15 @@ export function usePermitClaiming({
           continue;
         }
         try {
-          await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+          const receipt = await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+          if (receipt.status !== "success") {
+            throw new Error(`Approval transaction failed with status: ${receipt.status}`);
+          }
           approvedTokenIns.add(tokenIn);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           for (const g of tokenGroups) {
-            setSwapSubmissionStatus((prev) => ({ ...prev, [g.key]: { status: "error", message: `Swap failed: Approve timed out (${message})` } }));
+            setSwapSubmissionStatus((prev) => ({ ...prev, [g.key]: { status: "error", message: `Swap failed: Approve timed out or reverted (${message})` } }));
           }
         }
       }
@@ -343,6 +367,9 @@ export function usePermitClaiming({
 
           setSwapSubmissionStatus((prev) => ({ ...prev, [key]: { status: "submitted", message: `Swap order posted: ${orderId}` } }));
         } catch (error) {
+          for (const p of eligiblePermits) {
+            submittedPermitSignaturesRef.current.delete(p.signature);
+          }
           if (isUserRejectedRequest(error)) {
             setSwapSubmissionStatus((prev) => ({ ...prev, [key]: { status: "rejected", message: "Swap signing rejected by user" } }));
             continue;
@@ -355,6 +382,11 @@ export function usePermitClaiming({
     [preferredRewardTokenAddress, address, chain, walletClient, publicClient]
   );
 
+  /**
+   * Optimistically decrements local cached allowances and balances after successful claims.
+   *
+   * @param permits - Array of permits successfully claimed on-chain.
+   */
   const reduceAllowance = (permits: PermitData[]) => {
     setBalancesAndAllowances((prev) => {
       const newMap = new Map(prev);
@@ -374,6 +406,12 @@ export function usePermitClaiming({
     });
   };
 
+  /**
+   * Claims a single Permit2 reward permit, monitors confirmation, and initiates best-effort CoW swap.
+   *
+   * @param permit - The permit object to execute on-chain.
+   * @returns An object indicating whether the claim transaction succeeded and the transaction hash.
+   */
   const handleClaimPermit = async (permit: PermitData): Promise<{ success: boolean; txHash: string }> => {
     const permitKey = permit.signature;
 
@@ -426,6 +464,7 @@ export function usePermitClaiming({
           updatePermitStatusCache(permit.signature, { status: "Claimed", transactionHash: txHash });
           reduceAllowance([permit]);
           setError(null);
+          void maybeSubmitCowSwap([permit]).catch((err) => console.warn("CoW swap submission failed on recovery", err));
         });
         return { success: true, txHash };
       }
@@ -486,6 +525,11 @@ export function usePermitClaiming({
     }
   };
 
+  /**
+   * Sequentially claims a list of permits one-by-one with failure recovery and aggregated cash-out.
+   *
+   * @param permitsToClaim - Array of permits to execute sequentially.
+   */
   const handleClaimSequential = async (permitsToClaim: PermitData[]) => {
     if (!walletClient || !address || !chain || !publicClient) {
       console.error("Sequential claim: Wallet not connected - client:", walletClient, "address:", address, "chain:", chain);
@@ -554,6 +598,7 @@ export function usePermitClaiming({
             );
             updatePermitStatusCache(permit.signature, { status: "Claimed", transactionHash: txHash });
             reduceAllowance([permit]);
+            void maybeSubmitCowSwap([permit]).catch((err) => console.warn("CoW swap submission failed on recovery", err));
           });
           continue;
         }
@@ -603,6 +648,12 @@ export function usePermitClaiming({
     void maybeSubmitCowSwap(successfullyClaimedPermits).catch((err) => console.warn("CoW swap submission failed", err));
   };
 
+  /**
+   * Claims multiple permits in a single batched transaction using Permit2 batchPermitTransferFrom.
+   *
+   * @param permitsToClaim - Array of permits to claim in batch.
+   * @returns An object indicating whether the batch succeeded and the transaction hash.
+   */
   const handleClaimBatch = async (permitsToClaim: PermitData[]) => {
     if (!walletClient || !address || !chain || !publicClient) {
       console.error("Batch RPC: Wallet not connected - client:", walletClient, "address:", address, "chain:", chain);
@@ -679,6 +730,7 @@ export function usePermitClaiming({
             reduceAllowance(permitsToClaim);
             permitsToClaim.forEach((permit) => updatePermitStatusCache(permit.signature, { status: "Claimed", transactionHash: String(txHash) }));
             setError(null);
+            void maybeSubmitCowSwap(permitsToClaim).catch((err) => console.warn("CoW swap submission failed on recovery", err));
           });
         }
 

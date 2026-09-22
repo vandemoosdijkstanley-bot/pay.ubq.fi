@@ -20,8 +20,7 @@ const GNOSIS_TOKENS: RewardTokenInfo[] = [
 
 // --- Ethereum Mainnet (1) ---
 const MAINNET_TOKENS: RewardTokenInfo[] = [
-  // !!! IMPORTANT: Replace placeholder UUSD address when known !!!
-  { address: "0xb6919Ef2ee4aFC163BC954C5678e2BB570c2D103", symbol: "UUSD", decimals: 18 }, // <<< PLACEHOLDER UUSD ADDRESS
+  // UUSD settlement tokens are issued on Gnosis Chain; no verified Mainnet UUSD CoW liquidity exists.
   { address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", symbol: "WETH", decimals: 18 }, // Common WETH
   { address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", symbol: "USDT", decimals: 6 }, // Common USDT
   { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", symbol: "USDC", decimals: 6 }, // Common USDC
@@ -55,19 +54,37 @@ export const SUPPORTED_REWARD_TOKENS_BY_CHAIN: Record<number, RewardTokenInfo[]>
   [arbitrum.id]: ARBITRUM_ONE_TOKENS,
 };
 
-// Helper function to get tokens for a specific chain
+/**
+ * Retrieves the array of supported reward tokens configured for a specific blockchain network.
+ *
+ * @param chainId - The EVM chain identifier (e.g. 100 for Gnosis, 1 for Mainnet).
+ * @returns An array of RewardTokenInfo objects for the network, or an empty array if unsupported.
+ */
 export function getSupportedRewardTokensForChain(chainId: number | undefined): RewardTokenInfo[] {
   if (!chainId) return [];
   return SUPPORTED_REWARD_TOKENS_BY_CHAIN[chainId] || [];
 }
 
-// Helper function to get a specific token's info
+/**
+ * Looks up detailed metadata for a specific reward token by its contract address.
+ *
+ * @param chainId - The EVM chain identifier where the token is deployed.
+ * @param tokenAddress - The contract address of the reward token.
+ * @returns The RewardTokenInfo if found in the chain configuration, or undefined.
+ */
 export function getTokenInfo(chainId: number | undefined, tokenAddress: Address | null | undefined): RewardTokenInfo | undefined {
   if (!chainId || !tokenAddress) return undefined;
   const tokens = getSupportedRewardTokensForChain(chainId);
   return tokens.find((token) => token.address.toLowerCase() === tokenAddress.toLowerCase());
 }
 
+/**
+ * Looks up reward token information by symbol case-insensitively for a given network.
+ *
+ * @param chainId - The EVM chain identifier.
+ * @param symbol - The ticker symbol (e.g. "UUSD", "WETH", "USDC").
+ * @returns The RewardTokenInfo if found, or undefined.
+ */
 export function getTokenBySymbol(chainId: number | undefined, symbol: string): RewardTokenInfo | undefined {
   if (!chainId) return undefined;
   const normalized = symbol.trim().toLowerCase();

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type Address } from "viem";
 import type { AllowanceAndBalance, PermitData } from "../types.ts";
-import { getCowSwapQuote } from "../utils/cowswap-utils.ts";
+import { getCowSwapQuote, isCowSwapCashoutSupported } from "../utils/cowswap-utils.ts";
 import { applyPermitStatusOverrides, loadPermitStatusCache, upsertPermitStatusOverride } from "../utils/permit-status-cache.ts";
 import type { WorkerResponse } from "../workers/permit-checker.worker.ts";
 import { getPermitCheckerWorker, type PermitCheckerWorker } from "../workers/permit-worker-client.ts";
@@ -30,6 +30,11 @@ export function usePermitData({ address, isConnected, preferredRewardTokenAddres
   const requestIdRef = useRef(0);
   const lastAddressRef = useRef<string | null>(null);
 
+  /**
+   * Filters raw loaded permits to exclude already-claimed, invalid-nonce, or spent permits.
+   *
+   * @param permitsMap - Map of permit signature to PermitData.
+   */
   const filterPermits = useCallback(
     (permitsMap: Map<string, PermitData>) => {
       const normalizedAddress = address?.toLowerCase();
@@ -55,9 +60,16 @@ export function usePermitData({ address, isConnected, preferredRewardTokenAddres
     [address]
   );
 
+  /**
+   * Fetches CoW Protocol quotes for eligible UUSD permits when a preferred payout token is selected.
+   * Restricts quoting strictly to verified supported cashout networks (Gnosis Chain 100).
+   *
+   * @param permitsMap - Map of permit signature to PermitData.
+   * @returns Updated map of PermitData with estimatedAmountOut or quoteError populated.
+   */
   const fetchQuotes = useCallback(
     async (permitsMap: Map<string, PermitData>): Promise<Map<string, PermitData>> => {
-      if (!preferredRewardTokenAddress || !address || !chainId) {
+      if (!preferredRewardTokenAddress || !address || !chainId || !isCowSwapCashoutSupported(chainId)) {
         permitsMap.forEach((permit) => {
           delete permit.estimatedAmountOut;
           delete permit.quoteError;

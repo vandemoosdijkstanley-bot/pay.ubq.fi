@@ -15,6 +15,12 @@ import { PermitsTable } from "./permits-table.tsx";
 import { PreferredTokenSelectorButton } from "./preferred-token-selector-button.tsx";
 import { TxBanner } from "./tx-banner.tsx";
 
+/**
+ * Detects whether an unknown error was caused by the user rejecting a wallet signature or transaction.
+ *
+ * @param error - The caught error object.
+ * @returns true if the error represents user rejection, false otherwise.
+ */
 function isUserRejectedRequest(error: unknown): boolean {
   if (!error) return false;
 
@@ -36,6 +42,10 @@ function isUserRejectedRequest(error: unknown): boolean {
   return /user rejected|user denied|rejected the request|denied transaction signature|request rejected|action_rejected/i.test(message);
 }
 
+/**
+ * Main dashboard page component rendering permit claim table, reward summaries,
+ * wallet connection handlers, network switching, and preferred payout token controls.
+ */
 export function DashboardPage() {
   // UI State
   const [isTableVisible, setIsTableVisible] = useState(false);
